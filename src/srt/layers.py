@@ -1,19 +1,21 @@
+import math
+
 import torch
 import torch.nn as nn
-import numpy as np
 
-import math
+from torch import Tensor
 from einops import rearrange
-
 
 class PositionalEncoding(nn.Module):
     def __init__(self, num_octaves=8, start_octave=0):
         super().__init__()
         self.num_octaves = num_octaves
         self.start_octave = start_octave
+    
+    def out_dim(self, in_dim: int) -> int:
+        return in_dim * self.num_octaves * 2
 
-    def forward(self, coords, rays=None):
-        embed_fns = []
+    def forward(self, coords: Tensor) -> Tensor:
         batch_size, num_points, dim = coords.shape
 
         octaves = torch.arange(self.start_octave, self.start_octave + self.num_octaves)
@@ -37,9 +39,24 @@ class RayEncoder(nn.Module):
         super().__init__()
         self.pos_encoding = PositionalEncoding(num_octaves=pos_octaves, start_octave=pos_start_octave)
         self.ray_encoding = PositionalEncoding(num_octaves=ray_octaves, start_octave=ray_start_octave)
+    
+    def out_dim(self, in_dim: int) -> int:
+        return self.pos_encoding.out_dim(in_dim) + self.ray_encoding.out_dim(in_dim)
 
-    def forward(self, pos, rays):
-        if len(rays.shape) == 4:
+    def forward(self, pos: Tensor, rays: Tensor) -> Tensor:
+        '''
+        pos: (..., 3)
+        rays: (..., h, w, 3)
+
+        output: (..., h, w, 2 * (pos_octaves + ray_octaves) * 3)
+        '''
+        if len(rays.shape) > 4:
+            n_batch_dims = len(rays.shape) - 3
+            pos_ = pos.reshape(-1, pos.shape[-1])
+            rays_ = rays.reshape(-1, *rays.shape[-3:])
+            enc = self(pos_, rays_)
+            return enc.reshape(*rays.shape[:n_batch_dims], *enc.shape[-3:])
+        elif len(rays.shape) == 4:
             batchsize, height, width, dims = rays.shape
             pos_enc = self.pos_encoding(pos.unsqueeze(1))
             pos_enc = pos_enc.view(batchsize, pos_enc.shape[-1], 1, 1)
@@ -91,9 +108,7 @@ class Attention(nn.Module):
         project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
-        self.scale = dim_head ** -0.5
 
-        self.attend = nn.Softmax(dim=-1)
         if selfatt:
             self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
         else:
@@ -115,11 +130,7 @@ class Attention(nn.Module):
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
 
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-
-        attn = self.attend(dots)
-
-        out = torch.matmul(attn, v)
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 

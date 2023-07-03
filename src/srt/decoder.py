@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from srt.layers import RayEncoder, Transformer, PositionalEncoding
-from srt.utils import nerf
+import srt.utils.nerf as nerf
 
 
 class RayPredictor(nn.Module):
